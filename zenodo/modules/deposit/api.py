@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 #
 # This file is part of Zenodo.
-# Copyright (C) 2016 CERN.
+# Copyright (C) 2016, 2017 CERN.
 #
 # Zenodo is free software; you can redistribute it
 # and/or modify it under the terms of the GNU General Public License as
@@ -26,26 +26,28 @@
 
 from __future__ import absolute_import
 
+import uuid
 from contextlib import contextmanager
-from copy import copy
-from os.path import splitext
+from copy import copy, deepcopy
 
-from flask import current_app, request
+from flask import current_app
 from invenio_communities.models import Community, InclusionRequest
 from invenio_db import db
 from invenio_deposit.api import Deposit, preserve
-from invenio_files_rest.models import Bucket, MultipartObject, ObjectVersion, \
-    Part
+from invenio_files_rest.models import Bucket, MultipartObject, Part
 from invenio_pidstore.errors import PIDInvalidAction
 from invenio_pidstore.models import PersistentIdentifier, PIDStatus
-from invenio_records_files.api import FileObject, FilesIterator, _writable
 from invenio_records_files.models import RecordsBuckets
 
-from zenodo.modules.records.minters import is_local_doi, zenodo_doi_updater
+from invenio_pidrelations.api import PIDVersionRelation
+from zenodo.modules.records.api import (ZenodoFileObject, ZenodoFilesIterator,
+                                        ZenodoRecord)
+from zenodo.modules.records.minters import (is_local_doi, zenodo_doi_updater,
+                                            zenodo_head_recid_minter)
 from zenodo.modules.sipstore.api import ZenodoSIP
 
-from .errors import MissingCommunityError, MissingFilesError, \
-    OngoingMultipartUploadError
+from .errors import (MissingCommunityError, MissingFilesError,
+                     OngoingMultipartUploadError)
 from .fetchers import zenodo_deposit_fetcher
 from .minters import zenodo_deposit_minter
 
@@ -61,42 +63,14 @@ PRESERVE_FIELDS = (
 """Fields which will not be overwritten on edit."""
 
 
-class ZenodoFileObject(FileObject):
-    """Zenodo file object."""
-
-    def dumps(self):
-        """Create a dump."""
-        super(ZenodoFileObject, self).dumps()
-        self.data.update({
-            # Remove dot from extension.
-            'type': splitext(self.data['key'])[1][1:].lower(),
-            'file_id': str(self.file_id),
-        })
-        return self.data
-
-
-class ZenodoFilesIterator(FilesIterator):
-    """Zenodo files iterator."""
-
-    @_writable
-    def __setitem__(self, key, stream):
-        """Add file inside a deposit."""
-        with db.session.begin_nested():
-            size = None
-            if request and request.files and request.files.get('file'):
-                size = request.files['file'].content_length or None
-            obj = ObjectVersion.create(
-                bucket=self.bucket, key=key, stream=stream, size=size)
-            self.filesmap[key] = self.file_cls(obj, {}).dumps()
-            self.flush()
-
-
 class ZenodoDeposit(Deposit):
     """Define API for changing deposit state."""
 
     file_cls = ZenodoFileObject
 
     files_iter_cls = ZenodoFilesIterator
+
+    published_record_class = ZenodoRecord
 
     deposit_fetcher = staticmethod(zenodo_deposit_fetcher)
 
@@ -264,6 +238,27 @@ class ZenodoDeposit(Deposit):
         else:
             yield data
 
+    def _handle_record_versioning(self):
+
+        with db.session.begin_nested():
+            pid = PersistentIdentifier.get(pid_type='recid',
+                                           pid_value=self['recid'])
+            # Check if the record is already versioned
+            head_pid_value = self['_deposit'].get('head_id')
+            if not head_pid_value:
+                # If it's not, mint the Head PID and initialize versioning
+                head_pid_value = zenodo_head_recid_minter()
+                PIDVersionRelation.create_head(pid, head_pid_value)
+                self['_deposit']['head_id'] = head_pid_value
+            else:
+                # Otherwise, append this pid to it's head recid
+                assert 'head_id' in self['_deposit']
+                head_pid = PersistentIdentifier.get(
+                    pid_type='recid',
+                    pid_value=head_pid_value)
+                PIDVersionRelation.insert_version(
+                    head_pid=head_pid, pid=pid, index=-1)
+
     def _publish_new(self, id_=None):
         """Publish new deposit with communities handling."""
         # pop the 'communities' entry so they aren't added to the Record
@@ -282,7 +277,11 @@ class ZenodoDeposit(Deposit):
         auto_request = set(self._get_auto_requested())
 
         # Add the owned communities to the record
+        # FIXME: This fails if the Community was added by the user...
+        # May be unique case though if you are Zenodo admin (user 1)
         self._autoadd_communities(owned_comms | auto_added, self)
+
+        self._handle_record_versioning()
 
         record = super(ZenodoDeposit, self)._publish_new(id_=id_)
 
@@ -390,6 +389,7 @@ class ZenodoDeposit(Deposit):
         )
         data['_buckets'] = {'deposit': str(bucket.id)}
         deposit = super(ZenodoDeposit, cls).create(data, id_=id_)
+
         RecordsBuckets.create(record=deposit.model, bucket=bucket)
         return deposit
 
@@ -436,3 +436,60 @@ class ZenodoDeposit(Deposit):
         bucket.remove()
 
         return super(ZenodoDeposit, self).delete(*args, **kwargs)
+
+    def newversion(self):
+        assert self.is_published()
+        pid, record = self.fetch_published()
+
+        assert PIDVersionRelation.is_version(pid)
+
+        assert self.files
+        # Create snapshot of the bucket for the new version deposit
+
+        with db.session.begin_nested():
+            new_deposit_uuid = uuid.uuid4()
+
+            # Techincally this is a basic record edit, but also allows for
+            # editing files... This treatment here is a bit hackish and
+            # should be replaced.
+            data = self._prepare_edit(record)
+
+            # Preserve the fields of the `_deposit` key
+            old_deposit_metadata = deepcopy(data['_deposit'])
+            # Remove the old pid of the published record
+            del old_deposit_metadata['pid']
+
+            # Mint a new depid
+            self.deposit_minter(new_deposit_uuid, data=data)
+            # Add fields that were not changed
+            for k, v in old_deposit_metadata.items():
+                data['_deposit'].setdefault(k, v)
+
+            # TODO: See what other data may need to be removed for new record
+            # versions.
+            data.pop('doi', None)
+            data.pop('publication_date', None)
+            data.pop('_oai', None)
+            data.pop('_files', None)
+            data.pop('_buckets', None)
+
+            # Create the new deposit model
+            deposit = (super(ZenodoDeposit, self)
+                       .create(data, id_=new_deposit_uuid))
+
+            # Create snapshot from the record's bucket and update data
+            snapshot = record.files.bucket.snapshot(lock=False)
+            # FIXME: `Bucket.snapshot` doesn't set the locked to what is passed
+            snapshot.locked = False
+            db.session.add(RecordsBuckets(record=deposit.model,
+                                          bucket=snapshot))
+            # FIXME: `snapshot.id` might not be present because we need to
+            # commit first to the DB.
+            # db.session.commit()
+            deposit['_files'] = record.files.dumps(bucket=snapshot.id)
+            deposit['_buckets'] = {'deposit': str(snapshot.id)}
+            deposit.commit()
+
+        db.session.commit()
+
+        return deposit

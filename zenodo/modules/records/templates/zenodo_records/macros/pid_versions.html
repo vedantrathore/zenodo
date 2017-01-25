@@ -27,7 +27,7 @@
 <div class="dropdown pid-versions-dropdown">
   {% set current_record = {'version' : 0, 'latest': False } %}
   <ul class="dropdown-menu" aria-labelledby="pid-versions-dropdown">
-    {% set record_pid_versions = pid | pid_versions | reverse %}
+    {% set record_pid_versions = pid | pid_versions | reverse | list %}
     {% for pid_version in record_pid_versions %}
       {% set is_latest = pid_version is latest_pid_version %}
 

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 #
 # This file is part of Zenodo.
-# Copyright (C) 2016 CERN.
+# Copyright (C) 2016, 2017 CERN.
 #
 # Zenodo is free software; you can redistribute it
 # and/or modify it under the terms of the GNU General Public License as
@@ -42,6 +42,7 @@ from invenio_pidstore.models import PersistentIdentifier
 from invenio_pidstore.resolver import Resolver
 from invenio_records_files.api import Record
 from invenio_records_files.models import RecordsBuckets
+from invenio_pidrelations.api import PIDVersionRelation
 
 from zenodo.modules.records.permissions import record_permission_factory
 
@@ -136,6 +137,35 @@ def edit(pid=None, record=None, depid=None, deposit=None):
     return redirect(url_for(
         'invenio_deposit_ui.{0}'.format(depid.pid_type),
         pid_value=depid.pid_value
+    ))
+
+
+@blueprint.route(
+    '/record/<pid(recid,record_class="invenio_records.api:Record"):pid_value>'
+    '/newversion',
+    methods=['POST']
+)
+@login_required
+@pass_record('update')
+def newversion(pid=None, record=None, depid=None, deposit=None):
+    """Edit a record."""
+    # If the record doesn't have a DOI, its deposit shouldn't be editable.
+    if 'doi' not in record:
+        abort(404)
+
+    # FIXME: Maybe this has to go inside the API (`ZenodoDeposit.newversion`)
+    # If this is not the latest version, get the latest and extend it
+    if not PIDVersionRelation.is_latest(pid):
+        latest_pid = PIDVersionRelation.get_latest(pid)
+        # We still want to do a POST, so we specify a 307 reidrect code
+        return redirect(url_for('zenodo_deposit.newversion',
+                                pid_value=latest_pid.pid_value), code=307)
+
+    new_deposit = deposit.newversion()
+
+    return redirect(url_for(
+        'invenio_deposit_ui.{0}'.format(new_deposit.pid.pid_type),
+        pid_value=new_deposit.pid.pid_value
     ))
 
 

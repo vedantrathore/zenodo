@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 #
 # This file is part of Zenodo.
-# Copyright (C) 2016 CERN.
+# Copyright (C) 2016, 2017 CERN.
 #
 # Zenodo is free software; you can redistribute it
 # and/or modify it under the terms of the GNU General Public License as
@@ -31,7 +31,8 @@ from flask import current_app
 from invenio_db import db
 from invenio_oaiserver.minters import oaiid_minter
 from invenio_pidstore.errors import PIDValueError
-from invenio_pidstore.models import PersistentIdentifier, PIDStatus
+from invenio_pidstore.models import (PersistentIdentifier, PIDStatus,
+                                     RecordIdentifier)
 from invenio_pidstore.providers.recordid import RecordIdProvider
 
 
@@ -70,6 +71,18 @@ def zenodo_record_minter(record_uuid, data):
     oaiid_minter(record_uuid, data)
 
     return recid
+
+
+def zenodo_head_recid_minter(record_uuid=None, data=None):
+    """Mint Head record identifier (and DOI)."""
+    # FIXME: Maybe create a new provider for this? Maybe even place it in
+    # `invenio_pidrelations.providers`?
+    head_recid = str(RecordIdentifier.next())
+
+    # FIXME: What to do with these guys?
+    # zenodo_doi_minter(record_uuid, data)
+    # oaiid_minter(record_uuid, data)
+    return head_recid
 
 
 def zenodo_doi_minter(record_uuid, data):
