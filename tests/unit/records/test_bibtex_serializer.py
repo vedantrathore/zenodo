@@ -140,6 +140,11 @@ def test_get_note(bibtex_records):
     assert test_record['notes'] == record_good._get_note()
     assert "" == record_empty._get_note()
 
+def test_get_venue(bibtex_records):
+    """Test."""
+    (record_good, record_bad, record_empty, test_record) = bibtex_records
+    assert test_record["meeting"]["place"] == record_good._get_venue()
+    assert "" == record_empty._get_note()
 
 def test_get_address(bibtex_records):
     """Test."""

@@ -257,6 +257,7 @@ class Bibtex(object):
         opt_fields = opt_fields or []
         ign_fields = ign_fields or []
         fields = {
+            'venue': self._get_venue,
             'address': self._get_address,
             'author': self._get_author,
             'booktitle': self._get_booktitle,
@@ -288,6 +289,8 @@ class Bibtex(object):
             value = fields[field]()
             if value:
                 out += self._format_output_row(field, value)
+        from pprint import pprint
+        pprint(out)
         return out
 
     def _format_output_row(self, field, value):
@@ -410,6 +413,14 @@ class Bibtex(object):
         """Return any additional information that can help the reader."""
         if "notes" in self.record:
             return self.record["notes"]
+        else:
+            return ""
+
+    def _get_venue(self):
+        """Return meeting venue"""
+        if "meeting" in self.record and\
+                "place" in self.record["meeting"]:
+            return self.record["meeting"]["place"]
         else:
             return ""
 
